@@ -1,0 +1,14 @@
+{
+  "name": "shelfmark-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker API for Shelfmark (Claude proxy + KV storage)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
