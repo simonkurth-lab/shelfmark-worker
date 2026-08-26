@@ -6,7 +6,7 @@ compatibility_date = "2024-01-01"
 # Cloudflare dashboard, or `wrangler kv namespace list`).
 [[kv_namespaces]]
 binding = "SHELFMARK_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "f326e343327f4213b8658908a8f68f84"
 
 # Secrets (ANTHROPIC_API_KEY) are not stored here.
 # Set them with: wrangler secret put ANTHROPIC_API_KEY
