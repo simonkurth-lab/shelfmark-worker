@@ -22,6 +22,20 @@ const CHALLENGE_LABELS = {
   harder: 'a bit more challenging than that grade level - use richer vocabulary and make the wrong answer choices more subtly similar to the correct one',
 };
 
+// Cost circuit breaker: caps real Claude API calls (cache hits don't count) per day,
+// so a script hammering the public book-meta/quiz endpoints with unique fake inputs
+// can't run up an unbounded bill.
+const DAILY_CLAUDE_CALL_LIMIT = 300;
+
+async function tryConsumeDailyClaudeCall(env) {
+  const today = new Date().toISOString().slice(0, 10);
+  const key = 'usage:' + today;
+  const current = parseInt((await env.SHELFMARK_KV.get(key)) || '0', 10);
+  if (current >= DAILY_CLAUDE_CALL_LIMIT) return false;
+  await env.SHELFMARK_KV.put(key, String(current + 1), { expirationTtl: 172800 });
+  return true;
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -88,6 +102,7 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
 
         let meta;
         try {
+          if (!(await tryConsumeDailyClaudeCall(env))) throw new Error('daily_limit_reached');
           const raw = await callClaude(
             env,
             prompt,
@@ -118,6 +133,7 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
 
         let quiz;
         try {
+          if (!(await tryConsumeDailyClaudeCall(env))) throw new Error('daily_limit_reached');
           const raw = await callClaude(
             env,
             prompt,
