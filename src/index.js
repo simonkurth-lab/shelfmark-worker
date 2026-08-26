@@ -118,17 +118,22 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
 
       // ---- Quiz generation (cached in KV, keyed per book + question count) ----
       if (path === '/api/quiz' && request.method === 'POST') {
-        const { olid, title, author, summary, count, grade, challenge } = await request.json();
+        const { olid, title, author, summary, count, grade, challenge, lang } = await request.json();
         const questionCount = QUIZ_LENGTHS.includes(Number(count)) ? Number(count) : DEFAULT_QUIZ_LENGTH;
         const gradeKey = GRADE_LABELS[grade] ? grade : '35';
         const challengeKey = CHALLENGE_LABELS[challenge] ? challenge : 'onlevel';
-        const cacheKey = `quiz:${olid}:${questionCount}:${gradeKey}:${challengeKey}`;
+        const langKey = lang === 'es' ? 'es' : 'en';
+        const cacheKey = `quiz:${olid}:${questionCount}:${gradeKey}:${challengeKey}:${langKey}`;
         const cached = await env.SHELFMARK_KV.get(cacheKey);
         if (cached) return json(JSON.parse(cached));
 
+        const languageLine = langKey === 'es'
+          ? 'Write the entire quiz - every question and every answer choice - in Spanish. Use natural, clear Spanish appropriate for a Spanish-speaking student at that grade level, not a literal word-for-word translation.'
+          : 'Write the quiz in English.';
+
         const prompt = `Book: "${title}" by ${author}. Summary: ${summary}
 
-Write ${questionCount} multiple-choice comprehension questions for a student in ${GRADE_LABELS[gradeKey]} who just finished reading this book. Write the questions and answer choices ${CHALLENGE_LABELS[challengeKey]}. Keep questions broad and generic (main character, setting, general plot shape) rather than hyper-specific, especially since exact book details may not be fully known. Mix plot, character, and detail questions. Respond with ONLY raw JSON, no markdown:
+Write ${questionCount} multiple-choice comprehension questions for a student in ${GRADE_LABELS[gradeKey]} who just finished reading this book. Write the questions and answer choices ${CHALLENGE_LABELS[challengeKey]}. ${languageLine} Keep questions broad and generic (main character, setting, general plot shape) rather than hyper-specific, especially since exact book details may not be fully known. Mix plot, character, and detail questions. Respond with ONLY raw JSON, no markdown:
 {"questions":[{"q":"...", "options":["...","...","...","..."], "correctIndex":0}, ...]}`;
 
         let quiz;
