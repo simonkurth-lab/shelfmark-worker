@@ -16,6 +16,12 @@ const GRADE_LABELS = {
   '68': '6th through 8th grade (ages 11-14)',
   '912': '9th through 12th grade (ages 14-18)',
 };
+const GRADE_VOCAB_GUIDANCE = {
+  k2: 'Use very short sentences (about 5-8 words each), only the simplest everyday words a 5-8 year old already knows, and no compound or multi-clause sentences.',
+  '35': 'This is elementary school, not middle school - calibrate carefully. Use short, plain sentences (roughly 8-14 words). Use only everyday words a typical 9-11 year old reads independently: say "showed" not "demonstrated," "found out" not "discovered," "because" not "consequently," "scared" not "apprehensive." Avoid academic, abstract, or multisyllabic vocabulary and avoid sentences with multiple clauses or semicolons. Match the reading level of a Magic Tree House or Diary of a Wimpy Kid book, not a textbook or news article.',
+  '68': 'Use clear, moderate-length sentences and common middle-school vocabulary. Some richer words are fine, but avoid academic or technical vocabulary unless its meaning is obvious from context.',
+  '912': 'Standard high-school reading level - full vocabulary range is fine, but keep sentences clear rather than needlessly dense.',
+};
 const CHALLENGE_LABELS = {
   easier: 'a bit easier than that grade level - use simpler vocabulary, more straightforward sentence structure, and make the wrong answer choices clearly distinguishable',
   onlevel: 'right at that grade level in vocabulary and sentence complexity',
@@ -123,7 +129,7 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
         const gradeKey = GRADE_LABELS[grade] ? grade : '35';
         const challengeKey = CHALLENGE_LABELS[challenge] ? challenge : 'onlevel';
         const bilingualKey = bilingual ? 'bi' : 'en';
-        const cacheKey = `quiz:${olid}:${questionCount}:${gradeKey}:${challengeKey}:${bilingualKey}`;
+        const cacheKey = `quiz:v2:${olid}:${questionCount}:${gradeKey}:${challengeKey}:${bilingualKey}`;
         const cached = await env.SHELFMARK_KV.get(cacheKey);
         if (cached) return json(JSON.parse(cached));
 
@@ -135,7 +141,7 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
 
         const prompt = `Book: "${title}" by ${author}. Summary: ${summary}
 
-Write ${questionCount} multiple-choice comprehension questions for a student in ${GRADE_LABELS[gradeKey]} who just finished reading this book. Write the questions and answer choices ${CHALLENGE_LABELS[challengeKey]}. Keep questions broad and generic (main character, setting, general plot shape) rather than hyper-specific, especially since exact book details may not be fully known. Mix plot, character, and detail questions. ${formatBlock}`;
+Write ${questionCount} multiple-choice comprehension questions for a student in ${GRADE_LABELS[gradeKey]} who just finished reading this book. ${GRADE_VOCAB_GUIDANCE[gradeKey]} Within that reading level, make the questions and answer choices ${CHALLENGE_LABELS[challengeKey]}. Keep questions broad and generic (main character, setting, general plot shape) rather than hyper-specific, especially since exact book details may not be fully known. Mix plot, character, and detail questions. ${formatBlock}`;
 
         let quiz;
         try {
