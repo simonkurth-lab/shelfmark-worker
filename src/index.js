@@ -10,6 +10,17 @@ const CORS_HEADERS = {
 const QUIZ_LENGTHS = [5, 7, 10];
 const DEFAULT_QUIZ_LENGTH = 5;
 const PIN_RE = /^\d{4}$/;
+const GRADE_LABELS = {
+  k2: 'kindergarten through 2nd grade (ages 5-8)',
+  '35': '3rd through 5th grade (ages 8-11)',
+  '68': '6th through 8th grade (ages 11-14)',
+  '912': '9th through 12th grade (ages 14-18)',
+};
+const CHALLENGE_LABELS = {
+  easier: 'a bit easier than that grade level - use simpler vocabulary, more straightforward sentence structure, and make the wrong answer choices clearly distinguishable',
+  onlevel: 'right at that grade level in vocabulary and sentence complexity',
+  harder: 'a bit more challenging than that grade level - use richer vocabulary and make the wrong answer choices more subtly similar to the correct one',
+};
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -92,15 +103,17 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
 
       // ---- Quiz generation (cached in KV, keyed per book + question count) ----
       if (path === '/api/quiz' && request.method === 'POST') {
-        const { olid, title, author, summary, count } = await request.json();
+        const { olid, title, author, summary, count, grade, challenge } = await request.json();
         const questionCount = QUIZ_LENGTHS.includes(Number(count)) ? Number(count) : DEFAULT_QUIZ_LENGTH;
-        const cacheKey = `quiz:${olid}:${questionCount}`;
+        const gradeKey = GRADE_LABELS[grade] ? grade : '35';
+        const challengeKey = CHALLENGE_LABELS[challenge] ? challenge : 'onlevel';
+        const cacheKey = `quiz:${olid}:${questionCount}:${gradeKey}:${challengeKey}`;
         const cached = await env.SHELFMARK_KV.get(cacheKey);
         if (cached) return json(JSON.parse(cached));
 
         const prompt = `Book: "${title}" by ${author}. Summary: ${summary}
 
-Write ${questionCount} multiple-choice comprehension questions for a student who just finished reading this book, appropriate for a middle-grade reader (roughly ages 9-12). Keep questions broad and generic (main character, setting, general plot shape) rather than hyper-specific, especially since exact book details may not be fully known. Mix plot, character, and detail questions. Respond with ONLY raw JSON, no markdown:
+Write ${questionCount} multiple-choice comprehension questions for a student in ${GRADE_LABELS[gradeKey]} who just finished reading this book. Write the questions and answer choices ${CHALLENGE_LABELS[challengeKey]}. Keep questions broad and generic (main character, setting, general plot shape) rather than hyper-specific, especially since exact book details may not be fully known. Mix plot, character, and detail questions. Respond with ONLY raw JSON, no markdown:
 {"questions":[{"q":"...", "options":["...","...","...","..."], "correctIndex":0}, ...]}`;
 
         let quiz;
@@ -108,7 +121,7 @@ Write ${questionCount} multiple-choice comprehension questions for a student who
           const raw = await callClaude(
             env,
             prompt,
-            'You write short, clear, generic-is-fine comprehension quizzes for elementary readers. Always respond with only valid JSON.'
+            'You write short, clear, generic-is-fine comprehension quizzes calibrated to a specific school grade level. Always respond with only valid JSON.'
           );
           quiz = parseJsonLoose(raw);
         } catch (e) {
@@ -120,7 +133,7 @@ Write ${questionCount} multiple-choice comprehension questions for a student who
 
       // ---- Signup: create a new alias + PIN ----
       if (path === '/api/signup' && request.method === 'POST') {
-        const { alias, pin } = await request.json();
+        const { alias, pin, grade } = await request.json();
         const cleanAlias = (alias || '').trim();
         if (!cleanAlias || cleanAlias.length > 24) return json({ error: 'invalid_alias' }, 400);
         if (!PIN_RE.test(pin || '')) return json({ error: 'invalid_pin' }, 400);
@@ -129,7 +142,8 @@ Write ${questionCount} multiple-choice comprehension questions for a student who
         const existing = await env.SHELFMARK_KV.get(key);
         if (existing) return json({ error: 'alias_taken' }, 409);
 
-        const record = { alias: cleanAlias, pin, points: 0, history: [] };
+        const cleanGrade = GRADE_LABELS[grade] ? grade : '35';
+        const record = { alias: cleanAlias, pin, grade: cleanGrade, points: 0, history: [] };
         await env.SHELFMARK_KV.put(key, JSON.stringify(record));
         const { pin: _pin, ...safe } = record;
         return json(safe);
