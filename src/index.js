@@ -257,6 +257,30 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
         return json(students);
       }
 
+      // ---- Teacher: delete one quiz attempt from a student's history ----
+      // Recomputes points/wordsRead from the remaining history rather than
+      // subtracting, so there's no risk of drift if records are ever edited
+      // out of band.
+      if (path === '/api/teacher/delete-attempt' && request.method === 'POST') {
+        const { passcode, alias, classCode, index } = await request.json();
+        if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
+          return json({ error: 'unauthorized' }, 401);
+        }
+        const key = studentKey(alias || '', classCode);
+        const raw = await env.SHELFMARK_KV.get(key);
+        if (!raw) return json({ error: 'not_found' }, 404);
+        const record = JSON.parse(raw);
+        const hist = record.history || [];
+        const i = Number(index);
+        if (!Number.isInteger(i) || i < 0 || i >= hist.length) return json({ error: 'invalid_index' }, 400);
+        hist.splice(i, 1);
+        record.history = hist;
+        record.points = hist.reduce((sum, h) => sum + (h.points || 0), 0);
+        record.wordsRead = hist.reduce((sum, h) => sum + (h.words || 0), 0);
+        await env.SHELFMARK_KV.put(key, JSON.stringify(record));
+        return json(record);
+      }
+
       return json({ error: 'Not found' }, 404);
     } catch (err) {
       return json({ error: String(err) }, 500);
