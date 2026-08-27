@@ -230,6 +230,14 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
         return json(students);
       }
 
+      // ---- Teacher passcode check only (no data returned) - used to unlock
+      // the daily reading-word-count limit without fetching the full roster ----
+      if (path === '/api/teacher/verify' && request.method === 'POST') {
+        const { passcode } = await request.json();
+        const ok = !!env.TEACHER_PASSCODE && passcode === env.TEACHER_PASSCODE;
+        return json({ ok });
+      }
+
       // ---- Teacher roster: full detail including PIN, gated by a separate passcode ----
       if (path === '/api/teacher/roster' && request.method === 'POST') {
         const { passcode } = await request.json();
