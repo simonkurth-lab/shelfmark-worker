@@ -49,8 +49,17 @@ function json(data, status = 200) {
   });
 }
 
-function studentKey(alias) {
-  return 'student:' + alias.trim().toLowerCase();
+const DEFAULT_CLASS = 'default';
+
+function cleanClassCode(classCode) {
+  const cleaned = (classCode || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40);
+  return cleaned || DEFAULT_CLASS;
+}
+
+// Scoping the key by class lets two students in different classes share the
+// same alias - only alias + class together need to be unique.
+function studentKey(alias, classCode) {
+  return 'student:' + cleanClassCode(classCode) + ':' + alias.trim().toLowerCase();
 }
 
 async function callClaude(env, prompt, system) {
@@ -159,19 +168,20 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
         return json(quiz);
       }
 
-      // ---- Signup: create a new alias + PIN ----
+      // ---- Signup: create a new alias + PIN (scoped to a class) ----
       if (path === '/api/signup' && request.method === 'POST') {
-        const { alias, pin, grade } = await request.json();
+        const { alias, pin, grade, classCode } = await request.json();
         const cleanAlias = (alias || '').trim();
         if (!cleanAlias || cleanAlias.length > 24) return json({ error: 'invalid_alias' }, 400);
         if (!PIN_RE.test(pin || '')) return json({ error: 'invalid_pin' }, 400);
 
-        const key = studentKey(cleanAlias);
+        const cleanClass = cleanClassCode(classCode);
+        const key = studentKey(cleanAlias, cleanClass);
         const existing = await env.SHELFMARK_KV.get(key);
         if (existing) return json({ error: 'alias_taken' }, 409);
 
         const cleanGrade = GRADE_LABELS[grade] ? grade : '35';
-        const record = { alias: cleanAlias, pin, grade: cleanGrade, points: 0, history: [] };
+        const record = { alias: cleanAlias, pin, grade: cleanGrade, classCode: cleanClass, points: 0, history: [] };
         await env.SHELFMARK_KV.put(key, JSON.stringify(record));
         const { pin: _pin, ...safe } = record;
         return json(safe);
@@ -179,9 +189,9 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
 
       // ---- Login: verify PIN, return student record (never the pin) ----
       if (path === '/api/login' && request.method === 'POST') {
-        const { alias, pin } = await request.json();
+        const { alias, pin, classCode } = await request.json();
         const cleanAlias = (alias || '').trim();
-        const key = studentKey(cleanAlias);
+        const key = studentKey(cleanAlias, classCode);
         const raw = await env.SHELFMARK_KV.get(key);
         if (!raw) return json({ error: 'not_found' }, 404);
         const record = JSON.parse(raw);
@@ -193,19 +203,21 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
       // ---- Student save (merges into existing record, preserves pin) ----
       if (path.startsWith('/api/student/') && request.method === 'POST') {
         const alias = decodeURIComponent(path.replace('/api/student/', ''));
-        const key = studentKey(alias);
+        const key = studentKey(alias, url.searchParams.get('class'));
         const body = await request.json();
         const existingRaw = await env.SHELFMARK_KV.get(key);
         if (!existingRaw) return json({ error: 'not_found' }, 404);
         const existing = JSON.parse(existingRaw);
-        const merged = { ...existing, ...body, pin: existing.pin, alias: existing.alias };
+        const merged = { ...existing, ...body, pin: existing.pin, alias: existing.alias, classCode: existing.classCode };
         await env.SHELFMARK_KV.put(key, JSON.stringify(merged));
         return json({ ok: true });
       }
 
       // ---- Public roster (login screen): alias + points + book count only, never the pin ----
+      // Scoped to one class so kids in a different period don't see each other's aliases.
       if (path === '/api/roster' && request.method === 'GET') {
-        const list = await env.SHELFMARK_KV.list({ prefix: 'student:' });
+        const cleanClass = cleanClassCode(url.searchParams.get('class'));
+        const list = await env.SHELFMARK_KV.list({ prefix: 'student:' + cleanClass + ':' });
         const students = [];
         for (const key of list.keys) {
           const val = await env.SHELFMARK_KV.get(key.name);
