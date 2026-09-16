@@ -264,15 +264,31 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
       if (path === '/api/teacher/delete-attempt' && request.method === 'POST') {
         const { passcode, alias, classCode, index } = await request.json();
         if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
-          return json({ error: 'unauthorized' }, 401);
+          return json({ error: 'Wrong teacher passcode.' }, 401);
         }
-        const key = studentKey(alias || '', classCode);
-        const raw = await env.SHELFMARK_KV.get(key);
-        if (!raw) return json({ error: 'not_found' }, 404);
+        let key = studentKey(alias || '', classCode);
+        let raw = await env.SHELFMARK_KV.get(key);
+        if (!raw) {
+          // A student's classCode field can drift from the class prefix
+          // their record is actually keyed under (e.g. their class was
+          // corrected by hand after signup without re-keying the record).
+          // Fall back to a scan by alias alone so delete still finds them.
+          const cleanAlias = (alias || '').trim().toLowerCase();
+          const list = await env.SHELFMARK_KV.list({ prefix: 'student:' });
+          for (const k of list.keys) {
+            if (k.name.endsWith(':' + cleanAlias)) {
+              const candidate = await env.SHELFMARK_KV.get(k.name);
+              if (candidate) { key = k.name; raw = candidate; break; }
+            }
+          }
+        }
+        if (!raw) return json({ error: 'Could not find that student\'s record.' }, 404);
         const record = JSON.parse(raw);
         const hist = record.history || [];
         const i = Number(index);
-        if (!Number.isInteger(i) || i < 0 || i >= hist.length) return json({ error: 'invalid_index' }, 400);
+        if (!Number.isInteger(i) || i < 0 || i >= hist.length) {
+          return json({ error: 'That attempt no longer matches - try refreshing the roster.' }, 400);
+        }
         hist.splice(i, 1);
         record.history = hist;
         record.points = hist.reduce((sum, h) => sum + (h.points || 0), 0);
