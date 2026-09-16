@@ -62,6 +62,25 @@ function studentKey(alias, classCode) {
   return 'student:' + cleanClassCode(classCode) + ':' + alias.trim().toLowerCase();
 }
 
+// Looks a student record up by alias + classCode, falling back to a scan by
+// alias alone if the record's classCode field has drifted from the class
+// prefix it's actually keyed under (e.g. hand-corrected after signup).
+async function findStudentRecord(env, alias, classCode) {
+  let key = studentKey(alias || '', classCode);
+  let raw = await env.SHELFMARK_KV.get(key);
+  if (!raw) {
+    const cleanAlias = (alias || '').trim().toLowerCase();
+    const list = await env.SHELFMARK_KV.list({ prefix: 'student:' });
+    for (const k of list.keys) {
+      if (k.name.endsWith(':' + cleanAlias)) {
+        const candidate = await env.SHELFMARK_KV.get(k.name);
+        if (candidate) { key = k.name; raw = candidate; break; }
+      }
+    }
+  }
+  return raw ? { key, record: JSON.parse(raw) } : null;
+}
+
 async function callClaude(env, prompt, system) {
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -105,7 +124,7 @@ export default {
       // ---- Book metadata generation (cached in KV) ----
       if (path === '/api/book-meta' && request.method === 'POST') {
         const { olid, title, author, year, description } = await request.json();
-        const cacheKey = 'book:v2:' + olid;
+        const cacheKey = 'book:v3:' + olid;
         const cached = await env.SHELFMARK_KV.get(cacheKey);
         if (cached) return json(JSON.parse(cached));
 
@@ -113,7 +132,7 @@ export default {
 ${description ? 'Description: ' + description.slice(0, 600) : 'No description available - use your knowledge of this book.'}
 
 Respond with ONLY raw JSON, no markdown, in this exact shape:
-{"summary": "<2-3 sentence plot summary suitable for a 10-11 year old, no spoilers of the ending>", "genre": "<short genre label>", "estimatedWordCount": <number, your best estimate of the TOTAL WORDS OF ACTUAL TEXT in this specific book, based on what you know of it - not a page-count formula. A heavily illustrated picture book might be only 200-800 words total even across 32-48 pages. A middle-grade novel might be 20,000-50,000 words. A longer novel could be 100,000+. Give your real best estimate for this exact book.>}`;
+{"summary": "<2-3 sentence plot summary suitable for a 10-11 year old, no spoilers of the ending>", "genre": "<short genre label>", "estimatedWordCount": <number, your best estimate of the TOTAL WORDS OF ACTUAL TEXT in this specific book, based on what you know of it - not a page-count formula. A heavily illustrated picture book might be only 200-800 words total even across 32-48 pages. A middle-grade novel might be 20,000-50,000 words. A longer novel could be 100,000+. Give your real best estimate for this exact book.>, "lexile": <integer, your best-knowledge estimate of this specific book's official Lexile measure as a plain number (e.g. 650 for "650L"), or null if you don't have a reasonably confident estimate>, "lexileLabel": "<string display form of the same measure, e.g. 650L, BR150L for beginning reader, NC890L for non-conforming, or null>", "arLevel": <number, your best-knowledge estimate of this book's Accelerated Reader / ATOS book level, e.g. 4.2, or null if you don't have a reasonably confident estimate>}`;
 
         let meta;
         try {
@@ -121,11 +140,11 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
           const raw = await callClaude(
             env,
             prompt,
-            "You are a children's literature specialist helping a 5th grade teacher write short book summaries and estimate actual text length. Always respond with only valid JSON, nothing else."
+            "You are a children's literature specialist helping a 5th grade teacher write short book summaries and estimate actual text length and reading-level measures (Lexile, AR/ATOS). These are estimates from your general knowledge, not a lookup against the official Lexile/AR databases - only give a number when you're reasonably confident, otherwise use null. Always respond with only valid JSON, nothing else."
           );
           meta = parseJsonLoose(raw);
         } catch (e) {
-          meta = { summary: description ? description.slice(0, 220) : 'Summary unavailable.', genre: 'Fiction', estimatedWordCount: null };
+          meta = { summary: description ? description.slice(0, 220) : 'Summary unavailable.', genre: 'Fiction', estimatedWordCount: null, lexile: null, lexileLabel: null, arLevel: null };
         }
         await env.SHELFMARK_KV.put(cacheKey, JSON.stringify(meta));
         return json(meta);
@@ -230,6 +249,40 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
         return json(students);
       }
 
+      // ---- Public community reading stats (no PII) ----
+      // Powers the homepage motivational tracker: total books + words read
+      // across every class, bucketed by week/month/year/all-time. Only
+      // summed totals ever leave this endpoint - no alias, pin, or
+      // per-student breakdown - so it's safe to expose with no passcode.
+      if (path === '/api/community-stats' && request.method === 'GET') {
+        const now = new Date();
+        const startOfWeek = new Date(now);
+        const diffToMonday = (startOfWeek.getDay() + 6) % 7; // days since most recent Monday
+        startOfWeek.setDate(startOfWeek.getDate() - diffToMonday);
+        startOfWeek.setHours(0, 0, 0, 0);
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const startOfYear = new Date(now.getFullYear(), 0, 1);
+
+        const totals = { week: { books: 0, words: 0 }, month: { books: 0, words: 0 }, year: { books: 0, words: 0 }, allTime: { books: 0, words: 0 } };
+        const list = await env.SHELFMARK_KV.list({ prefix: 'student:' });
+        for (const key of list.keys) {
+          const val = await env.SHELFMARK_KV.get(key.name);
+          if (!val) continue;
+          const s = JSON.parse(val);
+          for (const h of (s.history || [])) {
+            const words = h.words || 0;
+            totals.allTime.books += 1;
+            totals.allTime.words += words;
+            const d = h.date ? new Date(h.date + 'T00:00:00') : null;
+            if (!d || isNaN(d)) continue;
+            if (d >= startOfYear) { totals.year.books += 1; totals.year.words += words; }
+            if (d >= startOfMonth) { totals.month.books += 1; totals.month.words += words; }
+            if (d >= startOfWeek) { totals.week.books += 1; totals.week.words += words; }
+          }
+        }
+        return json(totals);
+      }
+
       // ---- Teacher passcode check only (no data returned) - used to unlock
       // the daily reading-word-count limit without fetching the full roster ----
       if (path === '/api/teacher/verify' && request.method === 'POST') {
@@ -266,24 +319,9 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
         if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
           return json({ error: 'Wrong teacher passcode.' }, 401);
         }
-        let key = studentKey(alias || '', classCode);
-        let raw = await env.SHELFMARK_KV.get(key);
-        if (!raw) {
-          // A student's classCode field can drift from the class prefix
-          // their record is actually keyed under (e.g. their class was
-          // corrected by hand after signup without re-keying the record).
-          // Fall back to a scan by alias alone so delete still finds them.
-          const cleanAlias = (alias || '').trim().toLowerCase();
-          const list = await env.SHELFMARK_KV.list({ prefix: 'student:' });
-          for (const k of list.keys) {
-            if (k.name.endsWith(':' + cleanAlias)) {
-              const candidate = await env.SHELFMARK_KV.get(k.name);
-              if (candidate) { key = k.name; raw = candidate; break; }
-            }
-          }
-        }
-        if (!raw) return json({ error: 'Could not find that student\'s record.' }, 404);
-        const record = JSON.parse(raw);
+        const found = await findStudentRecord(env, alias, classCode);
+        if (!found) return json({ error: 'Could not find that student\'s record.' }, 404);
+        const { key, record } = found;
         const hist = record.history || [];
         const i = Number(index);
         if (!Number.isInteger(i) || i < 0 || i >= hist.length) {
@@ -293,6 +331,29 @@ Write ${questionCount} multiple-choice comprehension questions for a student in 
         record.history = hist;
         record.points = hist.reduce((sum, h) => sum + (h.points || 0), 0);
         record.wordsRead = hist.reduce((sum, h) => sum + (h.words || 0), 0);
+        await env.SHELFMARK_KV.put(key, JSON.stringify(record));
+        return json(record);
+      }
+
+      // ---- Teacher: set (or clear) a student's optional suggested Lexile
+      // reading range. Purely advisory - students can always read and quiz
+      // on any book regardless of what's set here. Pass null/blank for
+      // either bound to leave it open-ended, or both to clear the range. ----
+      if (path === '/api/teacher/set-range' && request.method === 'POST') {
+        const { passcode, alias, classCode, lexileMin, lexileMax } = await request.json();
+        if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
+          return json({ error: 'Wrong teacher passcode.' }, 401);
+        }
+        const found = await findStudentRecord(env, alias, classCode);
+        if (!found) return json({ error: 'Could not find that student\'s record.' }, 404);
+        const { key, record } = found;
+        const toNullableNumber = (v) => {
+          if (v === null || v === undefined || v === '') return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        record.lexileMin = toNullableNumber(lexileMin);
+        record.lexileMax = toNullableNumber(lexileMax);
         await env.SHELFMARK_KV.put(key, JSON.stringify(record));
         return json(record);
       }

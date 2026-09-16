@@ -38,7 +38,8 @@ npm run tail     # stream live logs
 
 ## API
 
-- `POST /api/book-meta` — `{olid, title, author, year, description}` → cached `{gradeLevel, summary, genre}`
+- `POST /api/book-meta` — `{olid, title, author, year, description}` → cached `{summary, genre, estimatedWordCount, lexile, lexileLabel, arLevel}`
 - `POST /api/quiz` — `{olid, title, author, summary, gradeLevel, count}` (`count` is `5`, `7`, or `10`, defaults to `5`) → cached `{questions: [{q, options, correctIndex}]}`, cached per `olid` + `count`
 - `GET  /api/student/:name` / `POST /api/student/:name` — read/write a student record
 - `GET  /api/roster` — list all student records
+- `POST /api/teacher/set-range` — `{passcode, alias, classCode, lexileMin, lexileMax}` → sets/clears a student's optional suggested Lexile reading range (advisory only, never blocks reading/quizzing)
