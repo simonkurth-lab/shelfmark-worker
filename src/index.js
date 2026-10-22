@@ -124,14 +124,20 @@ export default {
       // ---- Book metadata generation (cached in KV) ----
       if (path === '/api/book-meta' && request.method === 'POST') {
         const { olid, title, author, year, description } = await request.json();
-        const cacheKey = 'book:v4:' + olid;
+        const cacheKey = 'book:v5:' + olid;
         const cached = await env.SHELFMARK_KV.get(cacheKey);
         if (cached) return json(JSON.parse(cached));
 
-        const prompt = `Book: "${title}" by ${author}${year ? ' (' + year + ')' : ''}.
-${description ? 'Description: ' + description.slice(0, 1200) : 'No description available.'}
+        // No real description = the model can only guess from the title (and it
+        // does, confidently). Refuse rather than invent a plot.
+        if (!description || description.length < 40) {
+          return json({ confident: false, summary: null, genre: 'Fiction', estimatedWordCount: null, lexile: null, lexileLabel: null, arLevel: null });
+        }
 
-ACCURACY RULES: Base the summary ONLY on the description above or on details you genuinely know about this exact book by this exact author. Never guess a plot from the title alone - many books share similar titles. If there is no description and you do not clearly recognize this specific title and author, set "confident" to false and "summary" to null.
+        const prompt = `Book: "${title}" by ${author}${year ? ' (' + year + ')' : ''}.
+Description: ${description.slice(0, 1200)}
+
+ACCURACY RULES: Base the summary ONLY on the description above. Do not add characters, settings, or events that are not in it, and never guess from the title - many books share similar titles.
 
 Respond with ONLY raw JSON, no markdown, in this exact shape:
 {"confident": <true if the summary is grounded in the description or in solid knowledge of this exact book, otherwise false>, "summary": "<2-3 sentence plot summary suitable for a 10-11 year old, no spoilers of the ending>", "genre": "<short genre label>", "estimatedWordCount": <number, your best estimate of the TOTAL WORDS OF ACTUAL TEXT in this specific book, based on what you know of it - not a page-count formula. A heavily illustrated picture book might be only 200-800 words total even across 32-48 pages. A middle-grade novel might be 20,000-50,000 words. A longer novel could be 100,000+. Give your real best estimate for this exact book.>, "lexile": <integer, your best-knowledge estimate of this specific book's official Lexile measure as a plain number (e.g. 650 for "650L"), or null if you don't have a reasonably confident estimate>, "lexileLabel": "<string display form of the same measure, e.g. 650L, BR150L for beginning reader, NC890L for non-conforming, or null>", "arLevel": <number, your best-knowledge estimate of this book's Accelerated Reader / ATOS book level, e.g. 4.2, or null if you don't have a reasonably confident estimate>}`;
@@ -146,8 +152,8 @@ Respond with ONLY raw JSON, no markdown, in this exact shape:
             "You are a children's literature specialist helping a 5th grade teacher write short book summaries and estimate actual text length and reading-level measures (Lexile, AR/ATOS). These are estimates from your general knowledge, not a lookup against the official Lexile/AR databases - only give a number when you're reasonably confident, otherwise use null. Always respond with only valid JSON, nothing else."
           );
           meta = parseJsonLoose(raw);
-          if (!meta.summary) { meta.summary = description ? description.slice(0, 220) : null; meta.confident = !!description; }
-          if (meta.confident == null) meta.confident = true;
+          if (!meta.summary) meta.summary = description.slice(0, 220);
+          meta.confident = true;
         } catch (e) {
           // Transient failure (rate limit, bad JSON): don't poison the cache.
           cacheable = false;
