@@ -43,3 +43,8 @@ npm run tail     # stream live logs
 - `GET  /api/student/:name` / `POST /api/student/:name` — read/write a student record
 - `GET  /api/roster` — list all student records
 - `POST /api/teacher/set-range` — `{passcode, alias, classCode, lexileMin, lexileMax}` → sets/clears a student's optional suggested Lexile reading range (advisory only, never blocks reading/quizzing)
+- `POST /api/teacher/live/save` — `{passcode, classCode, session}` → creates/updates the teacher-paced live group session (one per class)
+- `POST /api/teacher/live/state` — `{passcode, classCode}` → `{session, responses}` with every group member's answers
+- `POST /api/teacher/live/end` — `{passcode, classCode}` → ends the session
+- `GET  /api/live?class=&alias=` — student poll: current question only (earlier ones with answers once revealed); never future questions or answers
+- `POST /api/live/answer` — `{classCode, alias, sessionId, qIndex, answer}` → records a group member's answer (changeable until the teacher reveals)
