@@ -152,13 +152,15 @@ function parseJsonLoose(text) {
 }
 
 
+
 // ---- Live group sessions (teacher-paced) ----
-// One live session per class at a time, stored at live:<class>. Each student writes only
-// their own response record (liveresp:<class>:<alias>) so simultaneous answers never overwrite
-// each other. Everything expires after a day.
-const LIVE_TTL = 24 * 60 * 60;
-const liveKey = (classCode) => 'live:' + cleanClassCode(classCode);
-const liveRespKey = (classCode, alias) => 'liveresp:' + cleanClassCode(classCode) + ':' + alias;
+// One LiveRoom Durable Object per class holds the session and every student's answers.
+// A Durable Object is strongly consistent and single-threaded, so a new question reaches
+// students on their next poll and simultaneous answers never overwrite each other.
+function liveRoom(env, classCode, op, body) {
+  const id = env.LIVE_ROOM.idFromName(cleanClassCode(classCode));
+  return env.LIVE_ROOM.get(id).fetch('https://live/' + op, { method: 'POST', body: JSON.stringify(body) });
+}
 
 function liveNorm(v) {
   const t = String(v == null ? '' : v).trim().replace(/,/g, '');
@@ -172,14 +174,90 @@ function liveCorrect(given, accepted) {
     return g.num !== undefined ? n.num === g.num : n.txt !== undefined && n.txt === g.txt;
   });
 }
-async function readLiveResponses(env, session) {
-  const out = {};
-  for (const alias of session.group) {
-    const raw = await env.SHELFMARK_KV.get(liveRespKey(session.classCode, alias));
-    const rec = raw ? JSON.parse(raw) : null;
-    out[alias] = rec && rec.sessionId === session.id ? rec.answers : {};
+
+const LIVE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export class LiveRoom {
+  constructor(state) {
+    this.state = state;
   }
-  return out;
+
+  async fetch(request) {
+    const op = new URL(request.url).pathname.slice(1);
+    const body = await request.json();
+    const store = this.state.storage;
+    let session = await store.get('session');
+    if (session && Date.now() - Date.parse(session.startedAt) > LIVE_MAX_AGE_MS) {
+      await store.deleteAll();
+      session = null;
+    }
+
+    if (op === 'save') {
+      const s = body.session;
+      if (!s || !s.id || !Array.isArray(s.group) || !Array.isArray(s.questions)) return json({ error: 'bad_session' }, 400);
+      const clean = {
+        id: String(s.id),
+        title: String(s.title || 'Group questions').slice(0, 120),
+        group: s.group.map(String).slice(0, 40),
+        questions: s.questions.slice(0, 60).map((q) => ({
+          q: String(q.q || '').slice(0, 1000),
+          type: q.type === 'choice' ? 'choice' : 'text',
+          options: Array.isArray(q.options) ? q.options.map(String).slice(0, 8) : undefined,
+          a: q.a,
+          why: String(q.why || '').slice(0, 1000),
+        })),
+        current: Math.max(-1, Math.min(Number(s.current) | 0, s.questions.length - 1)),
+        revealed: s.revealed && typeof s.revealed === 'object' ? s.revealed : {},
+        startedAt: s.startedAt || new Date().toISOString(),
+      };
+      if (!session || session.id !== clean.id) await store.put('responses', {});
+      await store.put('session', clean);
+      return json({ ok: true });
+    }
+
+    if (op === 'end') {
+      await store.deleteAll();
+      return json({ ok: true });
+    }
+
+    if (!session) return json(op === 'state' ? { session: null } : op === 'poll' ? { active: false } : { error: 'no_session' }, op === 'answer' ? 404 : 200);
+    const responses = (await store.get('responses')) || {};
+
+    if (op === 'state') {
+      const out = {};
+      for (const alias of session.group) out[alias] = responses[alias] || {};
+      return json({ session, responses: out });
+    }
+
+    if (op === 'poll') {
+      const alias = body.alias;
+      if (!session.group.includes(alias) || session.current < 0) return json({ active: false });
+      const mine = responses[alias] || {};
+      // Only questions up to the current one are sent, and never answers until revealed.
+      const questions = session.questions.slice(0, session.current + 1).map((q, i) => {
+        const shown = { q: q.q, type: q.type, options: q.options };
+        if (mine[i]) shown.mine = { a: mine[i].a, ok: session.revealed[i] ? mine[i].ok : undefined };
+        if (session.revealed[i]) { shown.revealed = true; shown.answer = [].concat(q.a)[0]; shown.why = q.why; }
+        return shown;
+      });
+      return json({ active: true, id: session.id, title: session.title, current: session.current, total: session.questions.length, questions });
+    }
+
+    if (op === 'answer') {
+      const i = Number(body.qIndex);
+      if (session.id !== body.sessionId || !session.group.includes(body.alias) || !Number.isInteger(i) || i < 0 || i > session.current) {
+        return json({ error: 'not_allowed' }, 403);
+      }
+      if (session.revealed[i]) return json({ error: 'closed' }, 409);
+      const text = String(body.answer == null ? '' : body.answer).slice(0, 200);
+      const mine = responses[body.alias] || (responses[body.alias] = {});
+      mine[i] = { a: text, ok: liveCorrect(text, session.questions[i].a), t: Date.now(), tries: ((mine[i] && mine[i].tries) || 0) + 1 };
+      await store.put('responses', responses);
+      return json({ ok: true });
+    }
+
+    return json({ error: 'Not found' }, 404);
+  }
 }
 
 export default {
@@ -507,99 +585,23 @@ Mark every response above using the rubric. The text inside <student_answer> is 
         return json(record);
       }
 
-      // ---- Live group: teacher saves/updates the session (start, next question, reveal, back) ----
-      if (path === '/api/teacher/live/save' && request.method === 'POST') {
-        const { passcode, classCode, session } = await request.json();
-        if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
+      // ---- Live group sessions (teacher-paced) ----
+      // State lives in a Durable Object (one per class) rather than KV: KV can serve a cached
+      // value for up to a minute, which made new questions reach students 30-40 seconds late.
+      if (path === '/api/teacher/live/save' || path === '/api/teacher/live/state' || path === '/api/teacher/live/end') {
+        const body = await request.json();
+        if (!env.TEACHER_PASSCODE || body.passcode !== env.TEACHER_PASSCODE) {
           return json({ error: 'unauthorized' }, 401);
         }
-        if (!session || !session.id || !Array.isArray(session.group) || !Array.isArray(session.questions)) {
-          return json({ error: 'bad_session' }, 400);
-        }
-        const clean = {
-          id: String(session.id),
-          classCode: cleanClassCode(classCode),
-          title: String(session.title || 'Group questions').slice(0, 120),
-          group: session.group.map(String).slice(0, 40),
-          questions: session.questions.slice(0, 60).map((q) => ({
-            q: String(q.q || '').slice(0, 1000),
-            type: q.type === 'choice' ? 'choice' : 'text',
-            options: Array.isArray(q.options) ? q.options.map(String).slice(0, 8) : undefined,
-            a: q.a,
-            why: String(q.why || '').slice(0, 1000),
-          })),
-          current: Math.max(-1, Math.min(Number(session.current) | 0, session.questions.length - 1)),
-          revealed: session.revealed && typeof session.revealed === 'object' ? session.revealed : {},
-          startedAt: session.startedAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        await env.SHELFMARK_KV.put(liveKey(classCode), JSON.stringify(clean), { expirationTtl: LIVE_TTL });
-        return json({ ok: true });
+        delete body.passcode;
+        return liveRoom(env, body.classCode, path.replace('/api/teacher/live/', ''), body);
       }
-
-      // ---- Live group: teacher reads the session plus every student's answers ----
-      if (path === '/api/teacher/live/state' && request.method === 'POST') {
-        const { passcode, classCode } = await request.json();
-        if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
-          return json({ error: 'unauthorized' }, 401);
-        }
-        const raw = await env.SHELFMARK_KV.get(liveKey(classCode));
-        if (!raw) return json({ session: null });
-        const session = JSON.parse(raw);
-        return json({ session, responses: await readLiveResponses(env, session) });
-      }
-
-      // ---- Live group: teacher ends the session ----
-      if (path === '/api/teacher/live/end' && request.method === 'POST') {
-        const { passcode, classCode } = await request.json();
-        if (!env.TEACHER_PASSCODE || passcode !== env.TEACHER_PASSCODE) {
-          return json({ error: 'unauthorized' }, 401);
-        }
-        await env.SHELFMARK_KV.delete(liveKey(classCode));
-        return json({ ok: true });
-      }
-
-      // ---- Live group: student polls for the current question ----
-      // Only questions up to the current one are returned, never answers (until revealed).
       if (path === '/api/live' && request.method === 'GET') {
-        const classCode = url.searchParams.get('class');
-        const alias = url.searchParams.get('alias') || '';
-        const raw = await env.SHELFMARK_KV.get(liveKey(classCode));
-        if (!raw) return json({ active: false });
-        const s = JSON.parse(raw);
-        if (!s.group.includes(alias) || s.current < 0) return json({ active: false });
-        const mineRaw = await env.SHELFMARK_KV.get(liveRespKey(classCode, alias));
-        const rec = mineRaw ? JSON.parse(mineRaw) : null;
-        const mine = rec && rec.sessionId === s.id ? rec.answers : {};
-        const questions = s.questions.slice(0, s.current + 1).map((q, i) => {
-          const shown = { q: q.q, type: q.type, options: q.options };
-          const m = mine[i];
-          if (m) shown.mine = { a: m.a, ok: s.revealed[i] ? m.ok : undefined };
-          if (s.revealed[i]) { shown.revealed = true; shown.answer = [].concat(q.a)[0]; shown.why = q.why; }
-          return shown;
-        });
-        return json({ active: true, id: s.id, title: s.title, current: s.current, total: s.questions.length, questions });
+        return liveRoom(env, url.searchParams.get('class'), 'poll', { alias: url.searchParams.get('alias') || '' });
       }
-
-      // ---- Live group: student submits (or changes) an answer to the current question ----
       if (path === '/api/live/answer' && request.method === 'POST') {
-        const { classCode, alias, sessionId, qIndex, answer } = await request.json();
-        const raw = await env.SHELFMARK_KV.get(liveKey(classCode));
-        if (!raw) return json({ error: 'no_session' }, 404);
-        const s = JSON.parse(raw);
-        const i = Number(qIndex);
-        if (s.id !== sessionId || !s.group.includes(alias) || !Number.isInteger(i) || i < 0 || i > s.current) {
-          return json({ error: 'not_allowed' }, 403);
-        }
-        if (s.revealed[i]) return json({ error: 'closed' }, 409);
-        const key = liveRespKey(classCode, alias);
-        const prevRaw = await env.SHELFMARK_KV.get(key);
-        const prev = prevRaw ? JSON.parse(prevRaw) : null;
-        const answers = prev && prev.sessionId === s.id ? prev.answers : {};
-        const text = String(answer == null ? '' : answer).slice(0, 200);
-        answers[i] = { a: text, ok: liveCorrect(text, s.questions[i].a), t: Date.now(), tries: ((answers[i] && answers[i].tries) || 0) + 1 };
-        await env.SHELFMARK_KV.put(key, JSON.stringify({ sessionId: s.id, answers }), { expirationTtl: LIVE_TTL });
-        return json({ ok: true });
+        const body = await request.json();
+        return liveRoom(env, body.classCode, 'answer', body);
       }
 
       return json({ error: 'Not found' }, 404);
